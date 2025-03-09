@@ -4,6 +4,7 @@ import numpy as np
 import gym
 import matplotlib.pyplot as plt
 from gym import spaces
+import imageio
 
 import numpy as np
 from torch import cos_
@@ -135,7 +136,7 @@ class SwimmingAgentEnv(gym.Env):
       - Thrust is computed based on the change in the swimmer’s area (from its global vertices),
         and the resulting 2D velocity is updated accordingly.
     """
-    def __init__(self, render_every=1):
+    def __init__(self, render_every=1, save_animation=False):
         super(SwimmingAgentEnv, self).__init__()
         self.pi = np.pi
         
@@ -167,6 +168,7 @@ class SwimmingAgentEnv(gym.Env):
         # Food position (2D target): sample at reset.
         self.food_position = np.array([0.0, 0.0])
         
+        self.save_animation = save_animation
         self.initialize_rendering()
         
         self.render_every = render_every
@@ -179,6 +181,7 @@ class SwimmingAgentEnv(gym.Env):
         """
         Set up persistent Matplotlib figure and axis for rendering.
         """
+        self.frames = []  # List to store frames for animation
         plt.ion()
         self.fig, self.ax = plt.subplots()
         self.ax.set_xlim(-1.1, 1.1)
@@ -377,6 +380,26 @@ class SwimmingAgentEnv(gym.Env):
         
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+
+        if self.save_animation:
+            frame = self._capture_frame()
+            self.frames.append(frame)
+    
+    def _capture_frame(self):
+        """
+        Captures the current figure as an RGB array.
+        """
+        self.fig.canvas.draw()
+        # Capture the frame and make a deep copy to preserve its state.
+        return np.array(self.fig.canvas.renderer.buffer_rgba()).copy()
+
+    def save_animation_file(self, filename="animation.gif", fps=10):
+        if not self.frames:
+            print("No frames to save.")
+            return
+        
+        imageio.mimsave(filename, self.frames, fps=fps)
+        print(f"Animation saved as {filename}")
 
 
 # --- Main simulation loop using improved rendering frequency ---

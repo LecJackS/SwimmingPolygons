@@ -1,2 +1,6 @@
 **/ppo_swimming_tensorboard/
 **/ppo_swimming_agent.py
+**/ppo_swimming_agent.zip
+.vscode/launch.json
+
+__pycache__/

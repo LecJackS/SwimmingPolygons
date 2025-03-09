@@ -6,3 +6,5 @@ Next steps:
 
 * 2D movements
 * Add 2+ more hinges to the triangle (octopus like movement)
+
+![./media/swimming_agent.gif](./media/swimming_agent.gif)
