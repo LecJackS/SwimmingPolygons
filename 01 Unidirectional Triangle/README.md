@@ -1,4 +1,4 @@
-# Version 1
+# Version 1: Horizontal Swimmer
 
 This part worked out well both as a new environment as an RL agent (at it should be by its simplicity).
 
