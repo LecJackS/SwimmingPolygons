@@ -9,6 +9,10 @@ Ideas:
 * Use physics equations of pushing with friction (x(t), v(t), a(t), mass, mu)
   * ie. when the triangle flaps, it generates a force F, that can be applied to the mass of the triangle sliding over a surface with friction mu (static and dinamic)
 
+* Instead of giving the coordinates of food (as part of the state), give the distance to it (eg. can "smell" it)
+  
+  * Q: is this enough? or it needs previous distances too to estimate direction? 
+
 * Rotations on the triangle points should only be applied when rendering
 
   * we can keep updating a simple vector for the speed and direction
