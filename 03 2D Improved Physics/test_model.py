@@ -5,7 +5,7 @@ from triangles import OctopusEnv
 
 # Create the environment instance.
 save_animation = False
-env = OctopusEnv()
+env = OctopusEnv(epsilon=0.0)
 
 # Load model and test it again
 
@@ -13,7 +13,7 @@ model = PPO.load("ppo_swimming_agent")
 obs = env.reset()
 
 
-max_frames = 100
+max_frames = 10000
 for i in range(max_frames):
     action, _states = model.predict(obs, deterministic=True)
     obs, reward, done, info = env.step(action)
@@ -21,6 +21,8 @@ for i in range(max_frames):
     #print(np.round(action, 2), np.round(obs[5:8], 2), np.round(reward, 3))
     print(i, np.around(obs, 2), np.around(action, 2), np.round(reward, 3))
     if done:
+        print("Reward:", reward)
+        print("-"*50)
         obs = env.reset()
         
 
