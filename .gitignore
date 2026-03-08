@@ -4,3 +4,6 @@
 .vscode/launch.json
 
 __pycache__/
+*.py[cod]
+*$py.class
+.venv/
