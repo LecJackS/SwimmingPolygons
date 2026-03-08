@@ -1,6 +1,6 @@
 # Swimming Polygons
 
-`Swimming Polygons` is a reinforcement learning project that iterates on a simple swimmer from a 1D hinge-propulsion toy setup to 2D target-seeking and then to a more explicit control/physics environment. The repository is organized as three chronological experiment stages. The top-level goal is to preserve the learning trajectory and keep each stage runnable.
+`Swimming Polygons` is a reinforcement learning project that iterates on a simple swimmer from a 1D hinge-propulsion toy setup to 2D target-seeking and then to a more explicit control/physics environment. The repository is organized as four chronological experiment stages. The top-level goal is to preserve the learning trajectory and keep each stage runnable.
 
 ## Project Evolution
 
@@ -11,6 +11,7 @@ The table below summarizes the current code behavior (source of truth), not just
 | V1 | `01 Unidirectional Triangle` | `SwimmingAgentEnv` | `Box(shape=(1,), low=-0.2, high=0.2)` | 7D vector: position, velocity, orientation, hinge, previous action | Done when `x >= 1.0` or `timestep >= 1000` | Mostly `-1` per step (+ reversal penalty), terminal reward `+1` |
 | V2 | `02 Multidirectional Triangle` | `SwimmingAgentEnv` | `Box(shape=(3,), low=-1, high=1)` | 12D vector: 2D position/velocity, orientation, hinge, previous action, food position, countdown | Done when close to food (`dist < 0.02`) or episode timeout (`100` steps) | Time penalty + action-shaping penalties + activity/thrust shaping + terminal adjustment |
 | V3 | `03 2D Improved Physics` | `OctopusEnv` | `MultiDiscrete([3, 3])` (turn, push) | Flattened history (`nHist=2`) of normalized 11-feature state, then masked | Done when close to food (`dist < 0.5`) or timeout (`time_limit=100`) | Sparse-like baseline (`-1` per step, `0` at success), with curriculum on target distance |
+| V4 | `04 Accelerated Physics` | `OctopusEnv` | `MultiDiscrete([3, 3])` (turn, push) | Flat normalized 11D vector with relative-target encoding | Done on success (`dist < 0.5`) or timeout (`100` steps), with curriculum target distance | V3-style baseline (`-1` per step, `0` at success) |
 
 ## Repository Map
 
@@ -23,6 +24,7 @@ Each version folder is mostly self-contained:
 Version-specific extras:
 
 - `03 2D Improved Physics/plot_statistics.py`: helper to inspect `historical_data.csv` distributions if that file is generated.
+- `04 Accelerated Physics/media/`: placeholder directory for future V4 visual artifacts.
 
 ## Reproducibility
 
@@ -59,7 +61,15 @@ python agent.py
 python test_model.py
 ```
 
-Training scripts are long-running by default (`100k+` timesteps in V1/V2 and `1,000,000` in V3).
+### Run Version 4
+
+```bash
+cd "04 Accelerated Physics"
+python agent.py
+python test_model.py
+```
+
+Training scripts are long-running by default (`100k+` timesteps in V1/V2 and `1,000,000+` in V3).
 
 ## Known Caveats / Current State
 

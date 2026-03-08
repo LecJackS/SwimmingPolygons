@@ -24,6 +24,7 @@ class PrintAvgDurationCallback(BaseCallback):
     def on_rollout_end(self):
         if hasattr(self.env, "run_avg_duration"):
             print(f"Running average duration: {np.round(self.env.run_avg_duration, 2)} - Food max distance: {np.round(self.env.food_dist, 2)}")
+            print(f"Normalized average duration: {np.round(self.env.run_avg_duration / self.env.food_dist, 2)}")
         return super().on_rollout_end()
     
 class ExponentialExplorationCallback(BaseCallback):
@@ -52,7 +53,7 @@ class ExponentialExplorationCallback(BaseCallback):
 # Create the environment instance.
 env = OctopusEnv(epsilon=0.0)
 #env = gym.make("Acrobot-v1")
-total_timesteps=10_000_000
+total_timesteps=1_000_000
 
 # callback = ExponentialExplorationCallback(env,
 #                                           epsilon_max=1.0,
@@ -292,9 +293,9 @@ model = PPO(
     learning_rate=1e-3,
     gamma=0.9,
     verbose=2,
-    n_steps=100*32,
-    n_epochs=10,
-    batch_size=100,
+    n_steps=128*32,
+    n_epochs=1,
+    batch_size=32,
     ent_coef=0.01,
     #clip_range=0.1,
     #vf_coef=0.5,

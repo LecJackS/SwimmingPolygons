@@ -1,0 +1,15 @@
+# Tested with Python 3.12.10
+--extra-index-url https://download.pytorch.org/whl/cu128
+click==8.3.1
+gym==0.26.2
+gputil==1.4.0
+imageio==2.37.2
+keyboard==0.13.5
+matplotlib==3.10.8
+numpy==1.26.4
+pandas==3.0.1
+ray[rllib]==2.54.0
+shimmy==2.0.0
+stable-baselines3==2.7.1
+tensorboard==2.20.0
+torch==2.10.0+cu128

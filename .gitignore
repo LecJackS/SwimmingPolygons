@@ -7,3 +7,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+
+# RL training artifacts / generated outputs
+**/checkpoints/
+**/rllib_checkpoints*/
+**/rllib_bench_*/
+**/tmp_stage_switch_checkpoints/
+**/tmp_old_save/
+**/ray_results/
+**/*.log
