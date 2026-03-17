@@ -63,6 +63,31 @@ cd "04 Accelerated Physics"
 python test_model.py --checkpoint-path ".\\rllib_checkpoints\\<checkpoint_dir>"
 ```
 
+## Validate The Environment
+
+Run the env-only validation harness:
+
+```bash
+cd "04 Accelerated Physics"
+python debug_env.py
+```
+
+Run the baseline probe set with a fixed seed and no plots:
+
+```bash
+cd "04 Accelerated Physics"
+python debug_env.py --probe-set baseline --seed 0 --no-plots
+```
+
+Artifacts are written under `media/debug_reports/<timestamp>/` and include:
+
+- `summary.json`
+- `action_metrics.csv`
+- `decay_metrics.csv`
+- `observation_checks.json`
+- `reward_checks.json`
+- plot images when `--no-plots` is not used
+
 ## Next Steps
 
 - Tune reward shaping while keeping training stable.

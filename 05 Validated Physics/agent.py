@@ -1,8 +1,10 @@
-"""V4 RLlib PPO training entrypoint with staged curriculum."""
+"""V5 RLlib PPO training entrypoint with staged curriculum."""
 
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import logging
 import os
 from pathlib import Path
@@ -17,11 +19,19 @@ from ray.tune.logger import NoopLogger
 from ray.tune.registry import register_env
 import torch
 
+from eval_utils import (
+    DEFAULT_CURRICULUM_STAGES,
+    DistanceEvalResult,
+    compute_stage_time_limit,
+    evaluate_env_rollouts,
+    flatten_distance_results,
+    parse_stage_distances,
+    weighted_success_score,
+)
 from triangles import OctopusEnv
 
 
-ENV_ID = "v4_octopus_env"
-DEFAULT_CURRICULUM_STAGES = [0.7, 1.0, 1.4, 2.0, 2.8, 4.0, 5.7, 8.0, 10.0]
+ENV_ID = "v5_octopus_env"
 
 # Reduce noisy upstream deprecation logs from RLlib internals that have no
 # direct user-land replacement in Ray 2.54.
@@ -36,7 +46,7 @@ logging.getLogger("ray._common.deprecation").setLevel(logging.ERROR)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train V4 fish policy with RLlib PPO.")
+    parser = argparse.ArgumentParser(description="Train V5 fish policy with RLlib PPO.")
     parser.add_argument("--train-iterations", type=int, default=100)
     parser.add_argument("--num-env-runners", type=int, default=8)
     parser.add_argument("--num-envs-per-runner", type=int, default=2)
@@ -63,6 +73,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--curriculum-consecutive-evals", type=int, default=2)
     parser.add_argument("--curriculum-time-limit-base", type=int, default=100)
     parser.add_argument("--curriculum-time-limit-max", type=int, default=180)
+    parser.add_argument(
+        "--eval-report-distances",
+        type=str,
+        default=",".join(str(v) for v in DEFAULT_CURRICULUM_STAGES),
+        help="Comma-separated fixed distances to score at each checkpoint.",
+    )
+    parser.add_argument("--eval-report-episodes", type=int, default=5)
+    parser.add_argument("--eval-report-seed", type=int, default=20_240)
 
     parser.add_argument(
         "--early-stop-enabled",
@@ -89,19 +107,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parse_stage_distances(raw: str) -> list[float]:
-    parts = [chunk.strip() for chunk in raw.split(",")]
-    if not parts or any(not part for part in parts):
-        raise ValueError("--curriculum-stages must be a non-empty comma-separated list.")
-
-    distances = [float(part) for part in parts]
-    if any(value <= 0 for value in distances):
-        raise ValueError("--curriculum-stages values must be > 0.")
-    if any(distances[idx] >= distances[idx + 1] for idx in range(len(distances) - 1)):
-        raise ValueError("--curriculum-stages must be strictly increasing.")
-    return distances
-
-
 def resolve_device(cli_device: str | None) -> str:
     if cli_device:
         return cli_device
@@ -111,7 +116,11 @@ def resolve_device(cli_device: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def validate_args(args: argparse.Namespace, stage_distances: list[float]) -> None:
+def validate_args(
+    args: argparse.Namespace,
+    stage_distances: list[float],
+    eval_report_distances: list[float],
+) -> None:
     if args.train_iterations <= 0:
         raise ValueError("--train-iterations must be > 0.")
     if args.num_env_runners <= 0:
@@ -133,6 +142,10 @@ def validate_args(args: argparse.Namespace, stage_distances: list[float]) -> Non
         raise ValueError("--curriculum-time-limit-base must be > 0.")
     if args.curriculum_time_limit_max < args.curriculum_time_limit_base:
         raise ValueError("--curriculum-time-limit-max must be >= --curriculum-time-limit-base.")
+    if not eval_report_distances:
+        raise ValueError("--eval-report-distances must contain at least one distance.")
+    if args.eval_report_episodes <= 0:
+        raise ValueError("--eval-report-episodes must be > 0.")
 
     if args.early_stop_distance <= 0:
         raise ValueError("--early-stop-distance must be > 0.")
@@ -197,22 +210,6 @@ def build_algo(
         .debugging(seed=args.seed, logger_creator=lambda cfg: NoopLogger(cfg, "."))
     )
     return config.build_algo()
-
-
-def compute_stage_time_limit(
-    distance: float,
-    *,
-    min_stage_distance: float,
-    max_stage_distance: float,
-    base_limit: int,
-    max_limit: int,
-) -> int:
-    if max_stage_distance <= min_stage_distance:
-        return int(base_limit)
-    ratio = (float(distance) - min_stage_distance) / (max_stage_distance - min_stage_distance)
-    ratio = float(np.clip(ratio, 0.0, 1.0))
-    late_stage_boost = ratio + 0.15 * ratio * (1.0 - ratio)
-    return int(round(base_limit + late_stage_boost * (max_limit - base_limit)))
 
 
 def compute_stage_success_threshold(
@@ -310,6 +307,16 @@ def extract_timesteps_total(result: dict[str, Any]) -> int:
     )
 
 
+def make_eval_env_factory(*, distance: float, time_limit: int):
+    return lambda: OctopusEnv(
+        epsilon=0.0,
+        render_mode=None,
+        enable_curriculum=False,
+        fixed_food_distance=distance,
+        time_limit=time_limit,
+    )
+
+
 def run_fixed_distance_eval(
     algo,
     *,
@@ -318,62 +325,124 @@ def run_fixed_distance_eval(
     num_episodes: int,
     base_seed: int,
 ) -> dict[str, float]:
-    env = OctopusEnv(
-        epsilon=0.0,
-        render_mode=None,
-        enable_curriculum=False,
-        fixed_food_distance=distance,
-        time_limit=time_limit,
+    result = evaluate_env_rollouts(
+        algo=algo,
+        env_factory=make_eval_env_factory(distance=distance, time_limit=time_limit),
+        num_episodes=num_episodes,
+        base_seed=base_seed,
+        stack_mode="old",
     )
-    successes = 0
-    episode_steps: list[int] = []
-    episode_rewards: list[float] = []
-
-    try:
-        for ep in range(num_episodes):
-            obs, _ = env.reset(seed=base_seed + ep)
-            total_reward = 0.0
-            steps = 0
-            terminated = False
-            truncated = False
-
-            while not (terminated or truncated):
-                action = algo.compute_single_action(obs, explore=False)
-                if isinstance(action, tuple):
-                    action = action[0]
-                action = np.asarray(action, dtype=np.int64).reshape(-1)
-                if action.size != 2:
-                    action = np.array([1, 1], dtype=np.int64)
-                obs, reward, terminated, truncated, _ = env.step(action)
-                total_reward += float(reward)
-                steps += 1
-
-            if terminated:
-                successes += 1
-            episode_steps.append(steps)
-            episode_rewards.append(total_reward)
-    finally:
-        env.close()
-
-    success_rate = successes / float(num_episodes)
-    mean_steps = float(np.mean(episode_steps)) if episode_steps else float("nan")
-    mean_reward = float(np.mean(episode_rewards)) if episode_rewards else float("nan")
     return {
-        "success_rate": success_rate,
-        "mean_steps": mean_steps,
-        "mean_reward": mean_reward,
+        "success_rate": float(result["success_rate"]),
+        "mean_steps": float(result["mean_steps"]),
+        "mean_reward": float(result["mean_reward"]),
+    }
+
+
+def evaluate_distance_suite(
+    algo,
+    *,
+    distances: list[float],
+    num_episodes: int,
+    base_seed: int,
+    min_stage_distance: float,
+    max_stage_distance: float,
+    base_limit: int,
+    max_limit: int,
+) -> list[DistanceEvalResult]:
+    results: list[DistanceEvalResult] = []
+    for distance_index, distance in enumerate(distances):
+        time_limit = compute_stage_time_limit(
+            distance,
+            min_stage_distance=min_stage_distance,
+            max_stage_distance=max_stage_distance,
+            base_limit=base_limit,
+            max_limit=max_limit,
+        )
+        metrics = evaluate_env_rollouts(
+            algo=algo,
+            env_factory=make_eval_env_factory(distance=distance, time_limit=time_limit),
+            num_episodes=num_episodes,
+            base_seed=base_seed + (distance_index * 10_000),
+            stack_mode="old",
+        )
+        results.append(
+            DistanceEvalResult(
+                distance=float(distance),
+                time_limit=int(time_limit),
+                success_rate=float(metrics["success_rate"]),
+                mean_steps=float(metrics["mean_steps"]),
+                mean_reward=float(metrics["mean_reward"]),
+                successes=int(metrics["successes"]),
+                episodes=int(metrics["episodes"]),
+            )
+        )
+    return results
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def write_flat_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                fieldnames.append(key)
+                seen.add(key)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def build_run_summary(
+    *,
+    run_reports: list[dict[str, Any]],
+    best_checkpoint_record: dict[str, Any] | None,
+    highest_stage_reached: int,
+    first_promotion: dict[str, Any] | None,
+    stage_six_reached: dict[str, Any] | None,
+    early_stop_event: dict[str, Any] | None,
+) -> dict[str, Any]:
+    best_per_distance: dict[str, float] = {}
+    if run_reports:
+        distance_keys = run_reports[0]["distance_results"].keys()
+        for distance_key in distance_keys:
+            best_per_distance[distance_key] = max(
+                float(report["distance_results"][distance_key]["success_rate"]) for report in run_reports
+            )
+
+    return {
+        "num_checkpoint_evaluations": len(run_reports),
+        "highest_stage_reached": int(highest_stage_reached),
+        "best_checkpoint": best_checkpoint_record,
+        "best_per_distance_success_rate": best_per_distance,
+        "time_to_first_promotion": first_promotion,
+        "time_to_stage_6": stage_six_reached,
+        "distance_10_early_stop": early_stop_event,
     }
 
 
 def main() -> None:
     args = parse_args()
     stage_distances = parse_stage_distances(args.curriculum_stages)
-    validate_args(args, stage_distances)
+    eval_report_distances = parse_stage_distances(args.eval_report_distances)
+    validate_args(args, stage_distances, eval_report_distances)
 
     device = resolve_device(args.device)
     num_gpus = 1 if device == "cuda" else 0
     checkpoint_root = Path(args.checkpoint_root)
     checkpoint_root.mkdir(parents=True, exist_ok=True)
+    eval_report_jsonl_path = checkpoint_root / "eval_reports.jsonl"
+    eval_report_csv_path = checkpoint_root / "eval_reports.csv"
+    run_summary_path = checkpoint_root / "run_summary.json"
     local_fs = pafs.LocalFileSystem()
 
     register_env(ENV_ID, make_env)
@@ -404,7 +473,7 @@ def main() -> None:
         env_config=build_env_config(args, distance=current_distance, time_limit=current_time_limit),
     )
 
-    print("V4 - Accelerated Physics RLlib training")
+    print("V5 - Validated Physics RLlib training")
     print(
         "Config: "
         f"iterations={args.train_iterations}, "
@@ -420,6 +489,9 @@ def main() -> None:
         f"curriculum_consecutive_evals={args.curriculum_consecutive_evals}, "
         f"curriculum_time_limit_base={args.curriculum_time_limit_base}, "
         f"curriculum_time_limit_max={args.curriculum_time_limit_max}, "
+        f"eval_report_distances={eval_report_distances}, "
+        f"eval_report_episodes={args.eval_report_episodes}, "
+        f"eval_report_seed={args.eval_report_seed}, "
         f"early_stop_enabled={args.early_stop_enabled}, "
         f"early_stop_distance={args.early_stop_distance}, "
         f"early_stop_success_rate={args.early_stop_success_rate}, "
@@ -437,6 +509,14 @@ def main() -> None:
     stage_pass_streak = 0
     early_stop_pass_streak = 0
     early_stop_triggered = False
+    highest_stage_reached = int(stage_index)
+    first_promotion: dict[str, Any] | None = None
+    stage_six_reached: dict[str, Any] | None = None
+    early_stop_event: dict[str, Any] | None = None
+    best_checkpoint_record: dict[str, Any] | None = None
+    best_checkpoint_score = float("-inf")
+    report_rows_nested: list[dict[str, Any]] = []
+    report_rows_flat: list[dict[str, Any]] = []
 
     try:
         for i in range(1, args.train_iterations + 1):
@@ -455,6 +535,67 @@ def main() -> None:
             checkpoint_path = checkpoint_root / f"checkpoint_{i:05d}"
             latest_checkpoint = save_algorithm_checkpoint(algo, checkpoint_path, local_fs)
             print(f"checkpoint_saved: {latest_checkpoint}")
+
+            report_results = evaluate_distance_suite(
+                algo,
+                distances=eval_report_distances,
+                num_episodes=args.eval_report_episodes,
+                base_seed=args.eval_report_seed + (i * 1_000_000),
+                min_stage_distance=min_stage_distance,
+                max_stage_distance=max_stage_distance,
+                base_limit=args.curriculum_time_limit_base,
+                max_limit=args.curriculum_time_limit_max,
+            )
+            report_score = weighted_success_score(report_results)
+            report_nested = {
+                "iteration": int(i),
+                "timesteps_total": int(timesteps_total),
+                "checkpoint_path": str(latest_checkpoint),
+                "current_stage_index": int(stage_index),
+                "current_stage_distance": float(current_distance),
+                "current_stage_time_limit": int(current_time_limit),
+                "training_reward_mean": float(reward_mean),
+                "weighted_success_score": float(report_score),
+                "distance_results": {
+                    f"{result.distance:g}": result.to_dict() for result in report_results
+                },
+            }
+            report_flat = {
+                "iteration": int(i),
+                "timesteps_total": int(timesteps_total),
+                "checkpoint_path": str(latest_checkpoint),
+                "current_stage_index": int(stage_index),
+                "current_stage_distance": float(current_distance),
+                "current_stage_time_limit": int(current_time_limit),
+                "training_reward_mean": float(reward_mean),
+                "weighted_success_score": float(report_score),
+                **flatten_distance_results(report_results),
+            }
+            report_rows_nested.append(report_nested)
+            report_rows_flat.append(report_flat)
+            write_jsonl(eval_report_jsonl_path, report_rows_nested)
+            write_flat_csv(eval_report_csv_path, report_rows_flat)
+
+            if np.isfinite(report_score) and report_score >= best_checkpoint_score:
+                best_checkpoint_score = float(report_score)
+                best_checkpoint_record = {
+                    "iteration": int(i),
+                    "timesteps_total": int(timesteps_total),
+                    "checkpoint_path": str(latest_checkpoint),
+                    "weighted_success_score": float(report_score),
+                }
+
+            distance_summary = " ".join(
+                f"{result.distance:g}:{format_metric(result.success_rate)}"
+                for result in report_results
+            )
+            print(
+                "eval_report: "
+                f"iter={i:03d} "
+                f"score={format_metric(report_score)} "
+                f"success_by_distance=[{distance_summary}] "
+                f"jsonl={eval_report_jsonl_path.name}"
+            )
 
             if args.early_stop_enabled:
                 early_stop_time_limit = compute_stage_time_limit(
@@ -511,6 +652,13 @@ def main() -> None:
                     early_stop_path = checkpoint_root / f"checkpoint_early_stop_iter_{i:05d}"
                     latest_checkpoint = save_algorithm_checkpoint(algo, early_stop_path, local_fs)
                     early_stop_triggered = True
+                    early_stop_event = {
+                        "iteration": int(i),
+                        "timesteps_total": int(timesteps_total),
+                        "checkpoint_path": str(latest_checkpoint),
+                        "success_rate": float(eval_success_rate),
+                        "required_success_rate": float(args.early_stop_success_rate),
+                    }
                     print(
                         "early_stop_triggered: "
                         f"iter={i:03d} "
@@ -522,6 +670,15 @@ def main() -> None:
                     break
 
             if not args.curriculum_enabled:
+                summary = build_run_summary(
+                    run_reports=report_rows_nested,
+                    best_checkpoint_record=best_checkpoint_record,
+                    highest_stage_reached=highest_stage_reached,
+                    first_promotion=first_promotion,
+                    stage_six_reached=stage_six_reached,
+                    early_stop_event=early_stop_event,
+                )
+                run_summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
                 continue
 
             curriculum_stats = run_fixed_distance_eval(
@@ -566,9 +723,27 @@ def main() -> None:
             )
 
             if stage_pass_streak < args.curriculum_consecutive_evals:
+                summary = build_run_summary(
+                    run_reports=report_rows_nested,
+                    best_checkpoint_record=best_checkpoint_record,
+                    highest_stage_reached=highest_stage_reached,
+                    first_promotion=first_promotion,
+                    stage_six_reached=stage_six_reached,
+                    early_stop_event=early_stop_event,
+                )
+                run_summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
                 continue
             if stage_index >= len(stage_distances) - 1:
                 print("curriculum_status: final_stage_reached_no_further_promotion")
+                summary = build_run_summary(
+                    run_reports=report_rows_nested,
+                    best_checkpoint_record=best_checkpoint_record,
+                    highest_stage_reached=highest_stage_reached,
+                    first_promotion=first_promotion,
+                    stage_six_reached=stage_six_reached,
+                    early_stop_event=early_stop_event,
+                )
+                run_summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
                 continue
 
             stage_checkpoint_path = checkpoint_root / f"checkpoint_stage_{stage_index:02d}_iter_{i:05d}"
@@ -594,6 +769,18 @@ def main() -> None:
                 f"checkpoint={latest_checkpoint}"
             )
 
+            highest_stage_reached = max(highest_stage_reached, int(stage_index))
+            promotion_event = {
+                "iteration": int(i),
+                "timesteps_total": int(timesteps_total),
+                "stage_index": int(stage_index),
+                "distance": float(next_distance),
+            }
+            if first_promotion is None:
+                first_promotion = promotion_event
+            if stage_index >= 6 and stage_six_reached is None:
+                stage_six_reached = promotion_event
+
             restore_checkpoint = latest_checkpoint
             algo.stop()
             algo = build_algo(
@@ -612,6 +799,15 @@ def main() -> None:
                 f"distance={current_distance:.3f} "
                 f"time_limit={current_time_limit}"
             )
+            summary = build_run_summary(
+                run_reports=report_rows_nested,
+                best_checkpoint_record=best_checkpoint_record,
+                highest_stage_reached=highest_stage_reached,
+                first_promotion=first_promotion,
+                stage_six_reached=stage_six_reached,
+                early_stop_event=early_stop_event,
+            )
+            run_summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     finally:
         if algo is not None:
             final_path = checkpoint_root / "checkpoint_final"
@@ -621,6 +817,17 @@ def main() -> None:
                 print("training_status: stopped_early_on_distance_rule")
             else:
                 print("training_status: reached_iteration_budget_or_stopped_without_distance_rule")
+            summary = build_run_summary(
+                run_reports=report_rows_nested,
+                best_checkpoint_record=best_checkpoint_record,
+                highest_stage_reached=highest_stage_reached,
+                first_promotion=first_promotion,
+                stage_six_reached=stage_six_reached,
+                early_stop_event=early_stop_event,
+            )
+            summary["final_checkpoint_path"] = str(latest_checkpoint)
+            summary["early_stop_triggered"] = bool(early_stop_triggered)
+            run_summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
             algo.stop()
         ray.shutdown()
 

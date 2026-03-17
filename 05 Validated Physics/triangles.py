@@ -111,6 +111,12 @@ class OctopusEnv(gym.Env):
             "terminated": False,
             "truncated": False,
         }
+        self.last_dynamics_debug: Dict[str, Any] = {
+            "thrust_vector": np.zeros(2, dtype=np.float32),
+            "acceleration": np.zeros(2, dtype=np.float32),
+            "torque": 0.0,
+            "angular_acceleration": 0.0,
+        }
 
         self.fig = None
         self.ax = None
@@ -179,6 +185,36 @@ class OctopusEnv(gym.Env):
             "terminated": False,
             "truncated": False,
         }
+        self.last_dynamics_debug = {
+            "thrust_vector": np.zeros(2, dtype=np.float32),
+            "acceleration": np.zeros(2, dtype=np.float32),
+            "torque": 0.0,
+            "angular_acceleration": 0.0,
+        }
+
+    def get_dynamics_breakdown(
+        self,
+        turn_idx: int,
+        push_idx: int,
+        *,
+        state: FishState | None = None,
+    ) -> Dict[str, Any]:
+        state = state or self.fish_state
+        cfg = self.fish_config
+        torque = float(self.turn_values[turn_idx])
+        thrust_magnitude = float(self.push_values[push_idx])
+        thrust_vector = np.array(
+            [math.cos(state.theta), math.sin(state.theta)],
+            dtype=np.float32,
+        ) * thrust_magnitude
+        acceleration = (thrust_vector - cfg.drag_coefficient * state.velocity) / cfg.mass
+        angular_acceleration = float((torque - cfg.rotational_damping * state.omega) / cfg.inertia)
+        return {
+            "thrust_vector": thrust_vector.astype(np.float32),
+            "acceleration": acceleration.astype(np.float32),
+            "torque": torque,
+            "angular_acceleration": angular_acceleration,
+        }
 
     def get_reward_breakdown(self, prev_dist_to_food: float, dist_to_food: float) -> Dict[str, float | bool]:
         progress_delta = float(prev_dist_to_food - dist_to_food)
@@ -219,6 +255,12 @@ class OctopusEnv(gym.Env):
             "prev_push_action": int(self.fish_state.prev_push_action),
             "observation": obs.copy(),
             "reward_breakdown": dict(self.last_reward_breakdown),
+            "dynamics_breakdown": {
+                "thrust_vector": np.asarray(self.last_dynamics_debug["thrust_vector"], dtype=np.float32).copy(),
+                "acceleration": np.asarray(self.last_dynamics_debug["acceleration"], dtype=np.float32).copy(),
+                "torque": float(self.last_dynamics_debug["torque"]),
+                "angular_acceleration": float(self.last_dynamics_debug["angular_acceleration"]),
+            },
         }
 
     def _get_obs(self) -> np.ndarray:
@@ -259,22 +301,44 @@ class OctopusEnv(gym.Env):
     def _compute_next_state(self, turn_idx: int, push_idx: int) -> FishState:
         cfg = self.fish_config
         state = self.fish_state
-        torque = float(self.turn_values[turn_idx])
-        thrust_magnitude = float(self.push_values[push_idx])
+        dynamics = self.get_dynamics_breakdown(turn_idx, push_idx, state=state)
+        torque = float(dynamics["torque"])
+        thrust_vector = np.asarray(dynamics["thrust_vector"], dtype=np.float32)
+        acceleration = np.asarray(dynamics["acceleration"], dtype=np.float32)
+        angular_acceleration = float(dynamics["angular_acceleration"])
+        dt = float(cfg.dt)
 
-        thrust_vector = np.array(
-            [math.cos(state.theta), math.sin(state.theta)],
-            dtype=np.float32,
-        ) * thrust_magnitude
-        acceleration = (thrust_vector - cfg.drag_coefficient * state.velocity) / cfg.mass
-
-        next_position = state.position + state.velocity * cfg.dt
-        next_velocity = state.velocity + acceleration * cfg.dt
+        drag_rate = float(cfg.drag_coefficient / cfg.mass) if cfg.mass > 0.0 else 0.0
+        if drag_rate > 0.0 and cfg.drag_coefficient > 0.0:
+            velocity_equilibrium = thrust_vector / cfg.drag_coefficient
+            drag_decay = math.exp(-drag_rate * dt)
+            next_velocity = velocity_equilibrium + (state.velocity - velocity_equilibrium) * drag_decay
+            next_position = (
+                state.position
+                + velocity_equilibrium * dt
+                + (state.velocity - velocity_equilibrium) * ((1.0 - drag_decay) / drag_rate)
+            )
+        else:
+            next_velocity = state.velocity + acceleration * dt
+            next_position = state.position + state.velocity * dt + 0.5 * acceleration * (dt * dt)
         next_velocity = self._clip_velocity(next_velocity.astype(np.float32))
 
-        next_theta = (state.theta + state.omega * cfg.dt) % (2.0 * math.pi)
-        next_omega = state.omega + ((torque - cfg.rotational_damping * state.omega) / cfg.inertia) * cfg.dt
+        rotational_rate = float(cfg.rotational_damping / cfg.inertia) if cfg.inertia > 0.0 else 0.0
+        if rotational_rate > 0.0 and cfg.rotational_damping > 0.0:
+            omega_equilibrium = torque / cfg.rotational_damping
+            rotational_decay = math.exp(-rotational_rate * dt)
+            next_omega = omega_equilibrium + (state.omega - omega_equilibrium) * rotational_decay
+            next_theta = (
+                state.theta
+                + omega_equilibrium * dt
+                + (state.omega - omega_equilibrium) * ((1.0 - rotational_decay) / rotational_rate)
+            )
+        else:
+            next_omega = state.omega + angular_acceleration * dt
+            next_theta = state.theta + state.omega * dt + 0.5 * angular_acceleration * (dt * dt)
+        next_theta = float(next_theta % (2.0 * math.pi))
         next_omega = float(np.clip(next_omega, -cfg.max_angular_speed, cfg.max_angular_speed))
+        self.last_dynamics_debug = dynamics
 
         return FishState(
             position=next_position.astype(np.float32),
@@ -334,6 +398,12 @@ class OctopusEnv(gym.Env):
             "total_reward": 0.0,
             "terminated": False,
             "truncated": False,
+        }
+        self.last_dynamics_debug = {
+            "thrust_vector": np.zeros(2, dtype=np.float32),
+            "acceleration": np.zeros(2, dtype=np.float32),
+            "torque": 0.0,
+            "angular_acceleration": 0.0,
         }
 
         obs = self._get_obs()

@@ -19,6 +19,7 @@ from triangles import OctopusEnv
 
 
 ENV_ID = "v4_octopus_env_eval"
+DEFAULT_CURRICULUM_STAGES = [0.7, 1.0, 1.4, 2.0, 2.8, 4.0, 5.7, 8.0, 10.0]
 
 logging.getLogger("ray._common.deprecation").setLevel(logging.ERROR)
 
@@ -33,6 +34,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-render", action="store_true")
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--time-limit", type=int, default=None)
+    parser.add_argument(
+        "--curriculum-stages",
+        type=str,
+        default=",".join(str(v) for v in DEFAULT_CURRICULUM_STAGES),
+        help="Comma-separated stage distances used to derive fixed-distance eval time limits.",
+    )
+    parser.add_argument("--curriculum-time-limit-base", type=int, default=100)
+    parser.add_argument("--curriculum-time-limit-max", type=int, default=180)
     parser.add_argument(
         "--fixed-food-distance",
         type=float,
@@ -49,6 +59,35 @@ def resolve_device(cli_device: str | None) -> str:
     if env_device:
         return env_device
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def parse_stage_distances(raw: str) -> list[float]:
+    parts = [chunk.strip() for chunk in raw.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("--curriculum-stages must be a non-empty comma-separated list.")
+
+    distances = [float(part) for part in parts]
+    if any(value <= 0 for value in distances):
+        raise ValueError("--curriculum-stages values must be > 0.")
+    if any(distances[idx] >= distances[idx + 1] for idx in range(len(distances) - 1)):
+        raise ValueError("--curriculum-stages must be strictly increasing.")
+    return distances
+
+
+def compute_stage_time_limit(
+    distance: float,
+    *,
+    min_stage_distance: float,
+    max_stage_distance: float,
+    base_limit: int,
+    max_limit: int,
+) -> int:
+    if max_stage_distance <= min_stage_distance:
+        return int(base_limit)
+    ratio = (float(distance) - min_stage_distance) / (max_stage_distance - min_stage_distance)
+    ratio = float(np.clip(ratio, 0.0, 1.0))
+    late_stage_boost = ratio + 0.15 * ratio * (1.0 - ratio)
+    return int(round(base_limit + late_stage_boost * (max_limit - base_limit)))
 
 
 def find_latest_checkpoint(root: Path) -> Path:
@@ -102,11 +141,33 @@ def main() -> None:
     args = parse_args()
     if args.fixed_food_distance is not None and args.fixed_food_distance <= 0:
         raise ValueError("--fixed-food-distance must be > 0.")
+    if args.time_limit is not None and args.time_limit <= 0:
+        raise ValueError("--time-limit must be > 0.")
+    if args.curriculum_time_limit_base <= 0:
+        raise ValueError("--curriculum-time-limit-base must be > 0.")
+    if args.curriculum_time_limit_max < args.curriculum_time_limit_base:
+        raise ValueError("--curriculum-time-limit-max must be >= --curriculum-time-limit-base.")
 
     device = resolve_device(args.device)
     num_gpus = 1 if device == "cuda" else 0
     checkpoint_root = Path(args.checkpoint_root)
     use_fixed_distance = args.fixed_food_distance is not None
+    stage_distances = parse_stage_distances(args.curriculum_stages)
+    min_stage_distance = float(stage_distances[0])
+    max_stage_distance = float(stage_distances[-1])
+
+    if args.time_limit is not None:
+        eval_time_limit = int(args.time_limit)
+    elif use_fixed_distance:
+        eval_time_limit = compute_stage_time_limit(
+            args.fixed_food_distance,
+            min_stage_distance=min_stage_distance,
+            max_stage_distance=max_stage_distance,
+            base_limit=args.curriculum_time_limit_base,
+            max_limit=args.curriculum_time_limit_max,
+        )
+    else:
+        eval_time_limit = args.curriculum_time_limit_base
 
     if args.checkpoint_path:
         if args.checkpoint_path.startswith("file://"):
@@ -128,6 +189,7 @@ def main() -> None:
         render_mode=render_mode,
         enable_curriculum=not use_fixed_distance,
         fixed_food_distance=args.fixed_food_distance,
+        time_limit=eval_time_limit,
     )
 
     register_env(
@@ -137,7 +199,7 @@ def main() -> None:
             render_mode=config.get("render_mode"),
             enable_curriculum=bool(config.get("enable_curriculum", True)),
             fixed_food_distance=config.get("fixed_food_distance"),
-            time_limit=int(config.get("time_limit", 100)),
+            time_limit=int(config.get("time_limit", eval_time_limit)),
         ),
     )
     os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
@@ -148,7 +210,7 @@ def main() -> None:
         "render_mode": None,
         "enable_curriculum": not use_fixed_distance,
         "fixed_food_distance": args.fixed_food_distance,
-        "time_limit": 100,
+        "time_limit": eval_time_limit,
     }
     algo = build_eval_algo(
         env_id=ENV_ID,
@@ -177,6 +239,7 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Stack mode: {stack_mode}")
     print(f"Render: {not args.no_render}")
+    print(f"Time limit: {eval_time_limit}")
     if use_fixed_distance:
         print(f"Food distance: fixed at {args.fixed_food_distance:.3f}")
     else:
