@@ -49,9 +49,18 @@ $argumentList = @(
     "--checkpoint-root", $checkpointRoot
 )
 
+$argumentString = ($argumentList | ForEach-Object {
+    $text = [string]$_
+    if ($text.Contains(" ")) {
+        '"' + $text.Replace('"', '\"') + '"'
+    } else {
+        $text
+    }
+}) -join " "
+
 $process = Start-Process `
     -FilePath $PythonExecutable `
-    -ArgumentList $argumentList `
+    -ArgumentList $argumentString `
     -WorkingDirectory $scriptDir `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
