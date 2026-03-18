@@ -1,0 +1,13 @@
+{
+  "checkpoint_path": null,
+  "device": null,
+  "episodes": 50,
+  "mean_food_eaten_per_fish": 0.9525,
+  "mean_steps": 600.0,
+  "mean_team_food_eaten": 7.62,
+  "mean_team_reward": 6.419999999999977,
+  "mean_visible_food_count_per_fish": 1.7992624999999998,
+  "policy_mode": "random",
+  "stack_mode": null,
+  "team_food_per_100_steps": 1.27
+}

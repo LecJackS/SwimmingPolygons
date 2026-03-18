@@ -1,0 +1,2 @@
+checkpoint_path,policy_mode,device,stack_mode,episodes,mean_team_food_eaten,mean_team_reward,mean_steps,team_food_per_100_steps,mean_food_eaten_per_fish,mean_visible_food_count_per_fish
+,random,,,50,7.62,6.419999999999977,600.0,1.27,0.9525,1.7992624999999998

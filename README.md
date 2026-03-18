@@ -1,6 +1,6 @@
 # Swimming Polygons
 
-`Swimming Polygons` is a reinforcement learning project that iterates on a simple swimmer from a 1D hinge-propulsion toy setup to 2D target-seeking, then to more explicit control/physics environments, and now to articulated fish bodies. The repository is organized as six chronological experiment stages. The top-level goal is to preserve the learning trajectory and keep each stage runnable.
+`Swimming Polygons` is a reinforcement learning project that iterates on a simple swimmer from a 1D hinge-propulsion toy setup to 2D target-seeking, then to more explicit control/physics environments, then to articulated fish bodies, and now to shared-policy schools. The repository is organized as seven chronological experiment stages. The top-level goal is to preserve the learning trajectory and keep each stage runnable.
 
 ## Project Evolution
 
@@ -14,6 +14,7 @@ The table below summarizes the current code behavior (source of truth), not just
 | V4 | `04 Accelerated Physics` | `OctopusEnv` | `MultiDiscrete([3, 3])` (turn, push) | Flat normalized 11D vector with relative-target encoding | Done on success (`dist < 0.5`) or timeout (`100` steps), with staged curriculum target distance | Step penalty + bounded progress shaping + terminal success bonus |
 | V5 | `05 Validated Physics` | `OctopusEnv` | `MultiDiscrete([3, 3])` (turn, push) | Flat normalized 11D vector with relative-target encoding | Done on success (`dist < 0.5`) or timeout, with staged curriculum inherited from V4 | Same current reward model as V4, plus expanded simulator validation and scripted visual debugging |
 | V6 | `06 Articulated Fish` | `ArticulatedFishEnv` (`OctopusEnv` alias kept for script compatibility) | `Box(shape=(2,), low=-1, high=1)` drive + steer | 46D observation: 36-bin local polar food sensor + 10 proprioception features | Done on timeout only (`time_limit=600` by default) in a continuous multi-pellet foraging field | `+1` per pellet eaten and a small per-step time cost |
+| V7 | `07 Shared Policy School` | `SchoolingFishEnv` | Per-fish `Box(shape=(2,), low=-1, high=1)` drive + steer | Per-fish 82D observation: 36 food bins + 36 peer bins + 10 proprioception features | Shared-world team foraging, timeout only, one shared pellet field, no fish-fish collisions in milestone 1 | Shared team reward: pellets eaten by the school minus a small step cost, broadcast to every fish |
 
 ## Repository Map
 
@@ -31,6 +32,8 @@ Version-specific extras:
 - `05 Validated Physics/debug_visual.py`: scripted simulator-only visual debugging entrypoint.
 - `06 Articulated Fish/debug_env.py`: articulated foraging env validation harness with locomotion, food-field, sensor, and reward-contract probes.
 - `06 Articulated Fish/debug_visual.py`: scripted articulated-fish foraging viewer with sensor overlay demos.
+- `07 Shared Policy School/debug_env.py`: multi-fish shared-world validation harness for food-field, peer-sensor, shared-reward, and simultaneity checks.
+- `07 Shared Policy School/debug_visual.py`: scripted shared-school viewer with one focus fish sensor overlay.
 
 ## Reproducibility
 
@@ -110,6 +113,18 @@ python debug_visual.py --scenario sensor_overlay_demo
 
 V6 keeps the RLlib/reporting stack, but now uses an articulated 3-segment fish in a continuous-foraging task with a local polar food sensor and renderable sensor overlay.
 
+### Run Version 7
+
+```bash
+cd "07 Shared Policy School"
+python agent.py
+python test_model.py
+python debug_env.py --probe-set baseline
+python debug_visual.py --scenario sensor_overlay_demo
+```
+
+V7 extends V6 into an 8-fish shared world with one shared trainable policy, a shared team reward, a local peer sensor, and a focus-fish render overlay.
+
 Training scripts are long-running by default (`100k+` timesteps in V1/V2 and `1,000,000+` in V3).
 
 ## Known Caveats / Current State
@@ -117,7 +132,7 @@ Training scripts are long-running by default (`100k+` timesteps in V1/V2 and `1,
 - Early versions use old Gym-style signatures; V4, V5, and V6 are Gymnasium-native.
 - Reward shaping is still experimental in V2/V3, with multiple commented alternatives in code.
 - `03 2D Improved Physics/test_model.py` has a `save_animation` toggle path that calls `env.save_animation_file(...)`, but `OctopusEnv` does not currently implement that method.
-- V5 is the frozen rigid-body validation baseline; V6 is the active articulated continuous-foraging branch.
+- V5 is the frozen rigid-body validation baseline; V6 is the frozen articulated single-fish foraging baseline; V7 is the active shared-policy schooling branch.
 - Subfolder READMEs are useful historical context, but the code is the source of truth when they differ.
 
 ## Artifacts

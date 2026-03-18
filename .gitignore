@@ -16,4 +16,5 @@ __pycache__/
 **/tmp_old_save/
 **/ray_results/
 **/*.log
+**/*.pid
 **/media/debug_reports/
