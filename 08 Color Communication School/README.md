@@ -258,6 +258,19 @@ python test_model.py `
   --summary-csv .\random_policy_baseline.csv
 ```
 
+Preview GIF export from the authoritative final V8 checkpoint:
+
+```powershell
+python test_model.py `
+  --checkpoint-path .\rllib_checkpoints_target_v8_attempt_01\checkpoint_final `
+  --render-profile full `
+  --render-engine safe `
+  --save-gif .\media\v8_final_checkpoint_full.gif `
+  --gif-seconds 6 `
+  --gif-fps 12 `
+  --focus-agent-id fish_0
+```
+
 ## Visual Debugging
 
 `debug_visual.py` runs scripted simulator-only scenarios:

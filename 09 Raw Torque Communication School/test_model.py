@@ -1,4 +1,4 @@
-"""V8 RLlib PPO checkpoint evaluation entrypoint for color communication schooling."""
+"""V9 RLlib PPO checkpoint evaluation entrypoint for raw-torque schooling."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ import logging
 import os
 from pathlib import Path
 
-import imageio.v2 as imageio
-import matplotlib.pyplot as plt
 import numpy as np
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -44,12 +42,12 @@ from triangles import CommunicatingSchoolEnv
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-ENV_ID = "v8_color_communication_school_env_eval"
+ENV_ID = "v9_raw_torque_communication_school_env_eval"
 
 logging.getLogger("ray._common.deprecation").setLevel(logging.ERROR)
 
 DEFAULT_MODEL_CONFIG = {
-    "fcnet_hiddens": [256, 256],
+    "fcnet_hiddens": [512, 512, 256],
     "fcnet_activation": "tanh",
 }
 
@@ -65,11 +63,11 @@ def configure_cpu_threading() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a trained V8 shared-policy checkpoint.")
+    parser = argparse.ArgumentParser(description="Evaluate a trained V9 shared-policy checkpoint.")
     parser.add_argument("--policy-mode", type=str, choices=["trained", "random"], default="trained")
     parser.add_argument("--checkpoint-path", type=str, default=None)
     parser.add_argument("--checkpoint-list-file", type=str, default=None)
-    parser.add_argument("--checkpoint-root", type=str, default="./rllib_checkpoints_baseline_v8_color_comm")
+    parser.add_argument("--checkpoint-root", type=str, default="./rllib_checkpoints_baseline_v9_raw_torque_comm")
     parser.add_argument("--max-frames", type=int, default=10_000)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--epsilon", type=float, default=0.0)
@@ -78,9 +76,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--render-profile", type=str, choices=["fast", "full"], default="fast")
     parser.add_argument("--render-engine", type=str, choices=["auto", "blit", "safe"], default="auto")
     parser.add_argument("--focus-agent-id", type=str, default="fish_0")
-    parser.add_argument("--save-gif", type=str, default=None)
-    parser.add_argument("--gif-seconds", type=float, default=6.0)
-    parser.add_argument("--gif-fps", type=int, default=12)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=1)
@@ -93,6 +88,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-cost", type=float, default=DEFAULT_STEP_COST)
     parser.add_argument("--sector-radius", type=float, default=DEFAULT_SECTOR_RADIUS)
     parser.add_argument("--sector-num", type=int, default=DEFAULT_SECTOR_NUM)
+    parser.add_argument("--reward-mode", type=str, choices=["forage", "locomotion_debug"], default="forage")
+    parser.add_argument("--history-length", type=int, default=8)
+    parser.add_argument("--actuator-time-constant", type=float, default=0.10)
     parser.add_argument("--mute-mode", type=str, choices=["normal", "both"], default="normal")
     parser.add_argument("--mute-messages", action="store_true")
     parser.add_argument("--summary-json", type=str, default=None)
@@ -184,10 +182,18 @@ def load_checkpoint_targets(args: argparse.Namespace, checkpoint_root: Path) -> 
 def validate_args(args: argparse.Namespace) -> None:
     if args.episodes <= 0:
         raise ValueError("--episodes must be > 0.")
-    if args.num_red_fish <= 0 or args.num_blue_fish <= 0:
-        raise ValueError("--num-red-fish and --num-blue-fish must be > 0.")
-    if args.num_red_pellets <= 0 or args.num_blue_pellets <= 0:
-        raise ValueError("--num-red-pellets and --num-blue-pellets must be > 0.")
+    if args.num_red_fish <= 0:
+        raise ValueError("--num-red-fish must be > 0.")
+    if args.reward_mode == "forage":
+        if args.num_blue_fish <= 0:
+            raise ValueError("--num-blue-fish must be > 0 in forage mode.")
+        if args.num_red_pellets <= 0 or args.num_blue_pellets <= 0:
+            raise ValueError("--num-red-pellets and --num-blue-pellets must be > 0 in forage mode.")
+    else:
+        if args.num_blue_fish < 0:
+            raise ValueError("--num-blue-fish must be >= 0 in locomotion_debug mode.")
+        if args.num_red_pellets < 0 or args.num_blue_pellets < 0:
+            raise ValueError("--num-red-pellets and --num-blue-pellets must be >= 0 in locomotion_debug mode.")
     if args.time_limit <= 0:
         raise ValueError("--time-limit must be > 0.")
     if args.pellet_reward <= 0.0:
@@ -197,28 +203,13 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.sector_radius <= 0.0:
         raise ValueError("--sector-radius must be > 0.")
     if args.sector_num != DEFAULT_SECTOR_NUM:
-        raise ValueError(f"--sector-num must remain {DEFAULT_SECTOR_NUM} in V8.")
+        raise ValueError(f"--sector-num must remain {DEFAULT_SECTOR_NUM} in V9.")
+    if args.history_length <= 0:
+        raise ValueError("--history-length must be > 0.")
+    if args.actuator_time_constant < 0.0:
+        raise ValueError("--actuator-time-constant must be >= 0.")
     if args.checkpoint_list_file and args.checkpoint_path:
         raise ValueError("--checkpoint-path and --checkpoint-list-file are mutually exclusive.")
-    if args.gif_seconds <= 0.0:
-        raise ValueError("--gif-seconds must be > 0.")
-    if args.gif_fps <= 0:
-        raise ValueError("--gif-fps must be > 0.")
-
-
-def capture_frame_rgb(env: CommunicatingSchoolEnv) -> np.ndarray:
-    if env.fig is None:
-        raise RuntimeError("Render figure is not initialized; cannot capture frame.")
-    env.fig.canvas.draw()
-    frame = np.asarray(env.fig.canvas.buffer_rgba(), dtype=np.uint8)
-    return frame[:, :, :3].copy()
-
-
-def write_gif(path: Path, frames: list[np.ndarray], *, fps: int) -> None:
-    if not frames:
-        raise ValueError("Cannot write GIF with zero frames.")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    imageio.mimsave(path, frames, format="GIF", duration=(1.0 / float(fps)))
 
 
 def locate_training_metadata(checkpoint_path: Path) -> Path | None:
@@ -262,6 +253,9 @@ def build_env_config(
         "sector_radius": float(source.get("sector_radius", args.sector_radius)),
         "sector_num": int(source.get("sector_num", args.sector_num)),
         "communication_radius": float(source.get("communication_radius", args.sector_radius)),
+        "reward_mode": str(source.get("reward_mode", args.reward_mode)),
+        "history_length": int(source.get("history_length", args.history_length)),
+        "actuator_time_constant": float(source.get("actuator_time_constant", args.actuator_time_constant)),
         "show_sensor_overlay": bool(show_sensor_overlay),
         "focus_agent_id": str(args.focus_agent_id),
         "mute_received_messages": bool(mute_received_messages),
@@ -562,16 +556,13 @@ def run_visual_rollout(args: argparse.Namespace, *, checkpoint_path: Path, resto
             algo.restore(restore_target)
             stack_mode = "new"
 
-        print("V8 - Color Communication School RLlib evaluation")
+        print("V9 - Raw Torque Communication School RLlib evaluation")
         print(f"Policy mode: trained")
         print(f"Checkpoint: {checkpoint_path.resolve()}")
         print(f"Device: {device}")
         print(f"Stack mode: {stack_mode}")
 
-        gif_output_path = Path(args.save_gif).resolve() if args.save_gif else None
-        if gif_output_path is not None:
-            plt.switch_backend("Agg")
-        render_mode = "human" if (gif_output_path is not None or not args.no_render) else None
+        render_mode = None if args.no_render else "human"
         env = CommunicatingSchoolEnv(
             **build_env_config(
                 args,
@@ -586,12 +577,10 @@ def run_visual_rollout(args: argparse.Namespace, *, checkpoint_path: Path, resto
         print(f"Render profile: {args.render_profile}")
         print(f"Render engine: {args.render_engine}")
         print(f"Focus agent: {args.focus_agent_id}")
-        if gif_output_path is not None:
-            print(f"GIF export: {gif_output_path}")
+        print(f"Reward mode: {eval_env_config.get('reward_mode', 'forage')}")
+        print(f"History length: {eval_env_config.get('history_length', args.history_length)}")
         try:
             obs_dict, _ = env.reset(seed=args.seed)
-            gif_frames: list[np.ndarray] = []
-            gif_frame_limit = int(round(args.gif_seconds * float(args.gif_fps))) if gif_output_path is not None else 0
             for frame_idx in range(1, args.max_frames + 1):
                 action_dict = compute_batched_deterministic_actions(
                     algo,
@@ -600,10 +589,8 @@ def run_visual_rollout(args: argparse.Namespace, *, checkpoint_path: Path, resto
                     policy_id=SHARED_POLICY_ID,
                 )
                 obs_dict, rewards, terminateds, truncateds, infos = env.step(action_dict)
-                if render_mode == "human":
+                if not args.no_render:
                     env.render()
-                    if gif_output_path is not None and len(gif_frames) < gif_frame_limit:
-                        gif_frames.append(capture_frame_rgb(env))
                 focus_info = infos[args.focus_agent_id]
                 if frame_idx % args.log_every == 0 or focus_info.get("food_eaten_this_step", 0):
                     print(
@@ -613,19 +600,20 @@ def run_visual_rollout(args: argparse.Namespace, *, checkpoint_path: Path, resto
                         f"red_food_episode={focus_info.get('food_eaten_episode_red', 0)} "
                         f"blue_food_episode={focus_info.get('food_eaten_episode_blue', 0)} "
                         f"visible_food={focus_info.get('visible_food_count', 0)} "
-                        f"msg={focus_info.get('emitted_message_token', 0)}"
+                        f"msg={focus_info.get('emitted_message_token', 0)} "
+                        f"fwd={focus_info.get('forward_velocity', 0.0):.3f} "
+                        f"lat={focus_info.get('lateral_velocity', 0.0):.3f} "
+                        f"ang={focus_info.get('angular_velocity', 0.0):.3f} "
+                        f"torque={focus_info.get('mean_abs_applied_torque', 0.0):.3f} "
+                        f"joint_limit={focus_info.get('mean_joint_limit_ratio', 0.0):.3f}"
                     )
                 if terminateds["__all__"] or truncateds["__all__"]:
                     print(
                         f"episode_end frame={frame_idx:05d} food_episode={focus_info.get('food_eaten_episode', 0)} "
-                        f"reward={rewards[args.focus_agent_id]:.3f}"
+                        f"reward={rewards[args.focus_agent_id]:.3f} "
+                        f"zero_crossings={focus_info.get('joint_velocity_zero_crossings', 0)}"
                     )
                     obs_dict, _ = env.reset(seed=args.seed + frame_idx)
-                if gif_output_path is not None and len(gif_frames) >= gif_frame_limit:
-                    break
-            if gif_output_path is not None:
-                write_gif(gif_output_path, gif_frames, fps=args.gif_fps)
-                print(f"saved_gif={gif_output_path}")
         finally:
             env.close()
     finally:
