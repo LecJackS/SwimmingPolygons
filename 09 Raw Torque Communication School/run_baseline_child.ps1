@@ -1,6 +1,9 @@
 param(
     [string]$PythonExecutable,
     [string]$Device,
+    [string]$PolicyStack,
+    [string]$TrainingPhase,
+    [string]$WarmstartMotionCheckpoint,
     [int]$TrainIterations,
     [int]$CheckpointEveryIterations,
     [int]$NumEnvRunners,
@@ -9,7 +12,23 @@ param(
     [int]$TimeLimit,
     [string]$RewardMode,
     [int]$HistoryLength,
-    [double]$ActuatorTimeConstant,
+    [double]$ActivationTimeConstant,
+    [double]$MotionEpsilonStart,
+    [double]$MotionEpsilonEnd,
+    [int]$MotionEpsilonDecayIterations,
+    [double]$MessageEpsilon,
+    [double]$JointPassiveStiffness,
+    [double]$JointSoftLimitStartRatio,
+    [double]$JointSoftLimitStiffness,
+    [double]$JointSoftLimitDamping,
+    [double]$BodyLinearDrag,
+    [double]$SwimAssistStartWeight,
+    [int]$SwimAssistMinIterations,
+    [double]$SwimAssistDisableForwardVelocity,
+    [double]$SwimAssistDisableJointLimitOccupancy,
+    [double]$SwimAssistDisableNegativeForwardFrac,
+    [int]$SwimAssistDisableConsecutiveEvals,
+    [int]$SwimAssistFadeEvals,
     [double]$Gamma,
     [double]$LearningRate,
     [double]$EntropyCoeff,
@@ -25,9 +44,13 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
 $env:PYTHONUNBUFFERED = "1"
+$cmdExe = $env:ComSpec
+if ([string]::IsNullOrWhiteSpace($cmdExe)) {
+    $cmdExe = "cmd.exe"
+}
 
-$header = "[{0}] baseline_child_started python={1} device={2} iterations={3} time_limit={4} reward_mode={5}" -f (Get-Date -Format s), $PythonExecutable, $Device, $TrainIterations, $TimeLimit, $RewardMode
-Add-Content -Path $StdoutPath -Value $header -Encoding utf8
+$header = "[{0}] baseline_child_started python={1} device={2} policy_stack={3} training_phase={4} iterations={5} time_limit={6} reward_mode={7}" -f (Get-Date -Format s), $PythonExecutable, $Device, $PolicyStack, $TrainingPhase, $TrainIterations, $TimeLimit, $RewardMode
+Add-Content -LiteralPath $StdoutPath -Value $header -Encoding ascii
 
 function Quote-Arg {
     param([string]$Text)
@@ -44,6 +67,8 @@ $pythonArgs = @(
     "-u",
     "agent.py",
     "--device", $Device,
+    "--policy-stack", $PolicyStack,
+    "--training-phase", $TrainingPhase,
     "--train-iterations", "$TrainIterations",
     "--checkpoint-every-iterations", "$CheckpointEveryIterations",
     "--num-env-runners", "$NumEnvRunners",
@@ -52,7 +77,23 @@ $pythonArgs = @(
     "--time-limit", "$TimeLimit",
     "--reward-mode", $RewardMode,
     "--history-length", "$HistoryLength",
-    "--actuator-time-constant", "$ActuatorTimeConstant",
+    "--activation-time-constant", "$ActivationTimeConstant",
+    "--motion-epsilon-start", "$MotionEpsilonStart",
+    "--motion-epsilon-end", "$MotionEpsilonEnd",
+    "--motion-epsilon-decay-iterations", "$MotionEpsilonDecayIterations",
+    "--message-epsilon", "$MessageEpsilon",
+    "--joint-passive-stiffness", "$JointPassiveStiffness",
+    "--joint-soft-limit-start-ratio", "$JointSoftLimitStartRatio",
+    "--joint-soft-limit-stiffness", "$JointSoftLimitStiffness",
+    "--joint-soft-limit-damping", "$JointSoftLimitDamping",
+    "--body-linear-drag", "$BodyLinearDrag",
+    "--swim-assist-start-weight", "$SwimAssistStartWeight",
+    "--swim-assist-min-iterations", "$SwimAssistMinIterations",
+    "--swim-assist-disable-forward-velocity", "$SwimAssistDisableForwardVelocity",
+    "--swim-assist-disable-joint-limit-occupancy", "$SwimAssistDisableJointLimitOccupancy",
+    "--swim-assist-disable-negative-forward-frac", "$SwimAssistDisableNegativeForwardFrac",
+    "--swim-assist-disable-consecutive-evals", "$SwimAssistDisableConsecutiveEvals",
+    "--swim-assist-fade-evals", "$SwimAssistFadeEvals",
     "--gamma", "$Gamma",
     "--learning-rate", "$LearningRate",
     "--entropy-coeff", "$EntropyCoeff",
@@ -61,29 +102,26 @@ $pythonArgs = @(
     "--num-epochs", "$NumEpochs",
     "--checkpoint-root", $CheckpointRoot
 )
+if (-not [string]::IsNullOrWhiteSpace($WarmstartMotionCheckpoint)) {
+    $pythonArgs += @("--warmstart-motion-checkpoint", $WarmstartMotionCheckpoint)
+}
 $pythonArgumentString = ($pythonArgs | ForEach-Object { Quote-Arg ([string]$_) }) -join " "
+$pythonCommand = ('"{0}" {1} 1>> "{2}" 2>> "{3}"' -f $PythonExecutable, $pythonArgumentString, $StdoutPath, $StderrPath)
 
-$oldErrorActionPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
+$exitCode = 1
 try {
-    $process = Start-Process `
-        -FilePath $PythonExecutable `
-        -ArgumentList $pythonArgumentString `
-        -WorkingDirectory $scriptDir `
-        -NoNewWindow `
-        -Wait `
-        -PassThru `
-        -RedirectStandardOutput $StdoutPath `
-        -RedirectStandardError $StderrPath
-    $exitCode = $process.ExitCode
-} finally {
-    $ErrorActionPreference = $oldErrorActionPreference
+    & $cmdExe /d /c $pythonCommand
+    $exitCode = $LASTEXITCODE
+} catch {
+    $errorText = ($_ | Out-String).Trim()
+    Add-Content -LiteralPath $StderrPath -Value $errorText -Encoding ascii
+    $exitCode = 1
 }
 
 $footer = "[{0}] baseline_child_finished exit_code={1}" -f (Get-Date -Format s), $exitCode
 if ($exitCode -eq 0) {
-    Add-Content -Path $StdoutPath -Value $footer -Encoding utf8
+    Add-Content -LiteralPath $StdoutPath -Value $footer -Encoding ascii
 } else {
-    Add-Content -Path $StderrPath -Value $footer -Encoding utf8
+    Add-Content -LiteralPath $StderrPath -Value $footer -Encoding ascii
 }
 exit $exitCode

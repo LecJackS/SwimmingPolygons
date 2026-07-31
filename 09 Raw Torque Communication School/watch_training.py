@@ -1,4 +1,4 @@
-"""Delayed finish-check watcher for V9 raw-torque schooling runs."""
+"""Delayed finish-check watcher for V9 muscle-activation schooling runs."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Watch a V9 raw-torque training run and auto-evaluate when it finishes.")
-    parser.add_argument("--pid-file", type=str, default="./baseline_v9_raw_torque_comm.pid")
-    parser.add_argument("--checkpoint-root", type=str, default="./rllib_checkpoints_baseline_v9_raw_torque_comm")
-    parser.add_argument("--log-path", type=str, default="./baseline_v9_raw_torque_comm.out.log")
+    parser = argparse.ArgumentParser(description="Watch a V9 muscle-activation training run and auto-evaluate when it finishes.")
+    parser.add_argument("--pid-file", type=str, default="./baseline_v9_muscle_activation_comm.pid")
+    parser.add_argument("--checkpoint-root", type=str, default="./rllib_checkpoints_baseline_v9_muscle_activation_comm")
+    parser.add_argument("--log-path", type=str, default="./baseline_v9_muscle_activation_comm.out.log")
     parser.add_argument("--check-offset-minutes", type=str, default="90,120", help="Comma-separated offsets in minutes from watcher start.")
     parser.add_argument("--primary-eval-episodes", type=int, default=10)
     parser.add_argument("--secondary-eval-episodes", type=int, default=10)

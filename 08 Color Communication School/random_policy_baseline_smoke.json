@@ -1,0 +1,43 @@
+{
+  "checkpoint_path": null,
+  "comm_gain_total_reward": 0.0,
+  "device": null,
+  "eval_result": {
+    "episodes": 5,
+    "mean_message_entropy": 1.9996733853929232,
+    "mean_pellets_blue_eaten_by_blue": 3.4,
+    "mean_pellets_per_fish": 0.6199999999999999,
+    "mean_pellets_red_eaten_by_red": 2.8,
+    "mean_reward_blue": -2.599999999999821,
+    "mean_reward_red": -3.199999999999773,
+    "mean_steps": 600.0,
+    "mean_total_reward": -5.799999999999479,
+    "mean_visible_food_count": 2.353066666666667,
+    "mean_visible_opponent_count": 0.8032,
+    "mean_visible_teammate_count": 0.6599333333333334,
+    "token_freq_0": 0.25303333333333333,
+    "token_freq_1": 0.2467,
+    "token_freq_2": 0.2509,
+    "token_freq_3": 0.24936666666666665
+  },
+  "message_muted_eval": {
+    "episodes": 5,
+    "mean_message_entropy": 1.9996733853929232,
+    "mean_pellets_blue_eaten_by_blue": 3.4,
+    "mean_pellets_per_fish": 0.6199999999999999,
+    "mean_pellets_red_eaten_by_red": 2.8,
+    "mean_reward_blue": -2.599999999999821,
+    "mean_reward_red": -3.199999999999773,
+    "mean_steps": 600.0,
+    "mean_total_reward": -5.799999999999479,
+    "mean_visible_food_count": 2.353066666666667,
+    "mean_visible_opponent_count": 0.8032,
+    "mean_visible_teammate_count": 0.6599333333333334,
+    "token_freq_0": 0.25303333333333333,
+    "token_freq_1": 0.2467,
+    "token_freq_2": 0.2509,
+    "token_freq_3": 0.24936666666666665
+  },
+  "policy_mode": "random",
+  "stack_mode": null
+}

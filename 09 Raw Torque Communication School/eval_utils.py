@@ -1,4 +1,4 @@
-"""Shared deterministic evaluation utilities for V9 raw-torque schooling."""
+"""Shared deterministic evaluation utilities for V9 muscle-activation schooling."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from urllib.parse import unquote, urlparse
 
 import numpy as np
 import torch
+from ray.rllib.core.columns import Columns
 
 
 DEFAULT_NUM_RED_FISH = 10
@@ -21,6 +22,7 @@ DEFAULT_STEP_COST = 0.002
 DEFAULT_SECTOR_RADIUS = 5.0
 DEFAULT_SECTOR_NUM = 6
 DEFAULT_NUM_MESSAGE_TOKENS = 4
+DEFAULT_SATURATED_COMMAND_THRESHOLD = 0.75
 SHARED_POLICY_ID = "shared_fish_policy"
 
 
@@ -40,9 +42,24 @@ class ColorCommEvalResult:
     mean_forward_velocity: float
     mean_lateral_velocity: float
     mean_abs_angular_velocity: float
+    num_motion_joints: int
+    mean_motion_command_abs: float
+    mean_motion_command_std_mean: float
+    fraction_saturated_motion_commands: float
+    mean_abs_desired_activation: float
+    mean_abs_activation: float
     mean_abs_applied_torque: float
     mean_joint_limit_occupancy: float
+    mean_near_limit_penalty: float
+    fraction_near_limit_joints: float
+    mean_joint_limit_excess: float
+    mean_saturation_penalty: float
+    mean_torque_penalty: float
+    fraction_joint_limit_high_steps: float
+    fraction_joints_quiet_steps: float
+    fraction_negative_forward_velocity_steps: float
     mean_joint_velocity_zero_crossings_per_fish: float
+    mean_activation_sign_changes_per_fish: float
     mean_nearest_food_distance: float
     mean_capture_distance: float
     mean_message_entropy: float
@@ -118,57 +135,105 @@ def uri_to_local_path(uri: str) -> Path:
     return Path(path)
 
 
-def _normalize_action(action: Any) -> dict[str, Any]:
+def _motion_dim_from_action_space(action_space: Any) -> int:
+    motion_space = getattr(action_space, "spaces", {}).get("motion")
+    if motion_space is None or not hasattr(motion_space, "shape") or len(tuple(motion_space.shape)) != 1:
+        raise ValueError("Expected Dict action space with 1-D 'motion' branch.")
+    motion_dim = int(motion_space.shape[0])
+    if motion_dim <= 0:
+        raise ValueError("Motion dimension must be > 0.")
+    return motion_dim
+
+
+def _policy_motion_dim(algo, policy_id: str = SHARED_POLICY_ID) -> int:
+    action_space = None
+    get_module = getattr(algo, "get_module", None)
+    if callable(get_module):
+        try:
+            module = get_module(policy_id)
+            action_space = getattr(module, "action_space", None)
+        except Exception:
+            action_space = None
+    if action_space is None:
+        policy = algo.get_policy(policy_id)
+        action_space = getattr(policy, "action_space", None)
+    return _motion_dim_from_action_space(action_space)
+
+
+def _normalize_action(action: Any, *, motion_dim: int) -> dict[str, Any]:
     if isinstance(action, tuple):
         action = action[0]
     if isinstance(action, dict):
-        motion = np.asarray(action.get("motion", [0.0, 0.0]), dtype=np.float32).reshape(2)
+        motion = np.asarray(action.get("motion", np.zeros(motion_dim, dtype=np.float32)), dtype=np.float32).reshape(motion_dim)
         message = int(np.asarray(action.get("message", 0)).reshape(-1)[0])
     else:
         values = np.asarray(action, dtype=np.float32).reshape(-1)
-        motion = np.zeros(2, dtype=np.float32)
+        motion = np.zeros(motion_dim, dtype=np.float32)
         message = 0
-        if values.size >= 2:
-            motion = values[:2].astype(np.float32)
-        if values.size >= 3:
-            message = int(values[2])
+        if values.size >= motion_dim:
+            motion = values[:motion_dim].astype(np.float32)
+        if values.size >= motion_dim + 1:
+            message = int(values[motion_dim])
     return {
         "motion": np.clip(motion, -1.0, 1.0).astype(np.float32),
         "message": int(np.clip(message, 0, DEFAULT_NUM_MESSAGE_TOKENS - 1)),
     }
 
 
-def _to_numpy_action_dict(action: Any) -> dict[str, Any]:
+def _to_numpy_action_dict(action: Any, *, motion_dim: int) -> dict[str, Any]:
     if isinstance(action, dict):
-        motion = action.get("motion", np.zeros((1, 2), dtype=np.float32))
+        motion = action.get("motion", np.zeros((1, motion_dim), dtype=np.float32))
         message = action.get("message", np.zeros((1,), dtype=np.int64))
         motion_np = np.asarray(motion, dtype=np.float32).reshape(-1)
         message_np = np.asarray(message).reshape(-1)
         return {
-            "motion": motion_np[:2].astype(np.float32) if motion_np.size >= 2 else np.zeros(2, dtype=np.float32),
+            "motion": motion_np[:motion_dim].astype(np.float32) if motion_np.size >= motion_dim else np.zeros(motion_dim, dtype=np.float32),
             "message": int(message_np[0]) if message_np.size else 0,
         }
-    return _normalize_action(action)
+    return _normalize_action(action, motion_dim=motion_dim)
 
 
-def _compute_action_new_stack(algo, obs: np.ndarray) -> dict[str, Any]:
-    module = algo.get_module()
+def _compute_action_new_stack(algo, obs: np.ndarray, *, stochastic: bool = False, policy_id: str = SHARED_POLICY_ID) -> dict[str, Any]:
+    module = algo.get_module(policy_id)
     obs_batch = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
     with torch.no_grad():
-        out = module.forward_inference({"obs": obs_batch})
-    if "actions" not in out:
-        raise RuntimeError("RLModule inference did not return actions for mixed action space.")
-    return _to_numpy_action_dict(out["actions"])
+        if stochastic:
+            out = module.forward_exploration({"obs": obs_batch})
+            dist_cls = module.get_exploration_action_dist_cls()
+        else:
+            out = module.forward_inference({"obs": obs_batch})
+            dist_cls = module.get_inference_action_dist_cls()
+    actions = out.get(Columns.ACTIONS)
+    if actions is None:
+        if Columns.ACTION_DIST_INPUTS not in out:
+            raise RuntimeError("RLModule inference did not return action dist inputs for mixed action space.")
+        action_dist = dist_cls.from_logits(out[Columns.ACTION_DIST_INPUTS])
+        if not stochastic:
+            action_dist = action_dist.to_deterministic()
+        actions = action_dist.sample()
+    motion_dim = _policy_motion_dim(algo, policy_id=policy_id)
+    return _to_numpy_action_dict(actions, motion_dim=motion_dim)
 
 
-def _compute_action_batch_new_stack(algo, obs_batch: np.ndarray):
-    module = algo.get_module()
+def _compute_action_batch_new_stack(algo, obs_batch: np.ndarray, *, stochastic: bool = False, policy_id: str = SHARED_POLICY_ID):
+    module = algo.get_module(policy_id)
     obs_tensor = torch.tensor(obs_batch, dtype=torch.float32)
     with torch.no_grad():
-        out = module.forward_inference({"obs": obs_tensor})
-    if "actions" not in out:
-        raise RuntimeError("RLModule inference did not return batched actions for mixed action space.")
-    return out["actions"]
+        if stochastic:
+            out = module.forward_exploration({"obs": obs_tensor})
+            dist_cls = module.get_exploration_action_dist_cls()
+        else:
+            out = module.forward_inference({"obs": obs_tensor})
+            dist_cls = module.get_inference_action_dist_cls()
+    actions = out.get(Columns.ACTIONS)
+    if actions is None:
+        if Columns.ACTION_DIST_INPUTS not in out:
+            raise RuntimeError("RLModule inference did not return batched dist inputs for mixed action space.")
+        action_dist = dist_cls.from_logits(out[Columns.ACTION_DIST_INPUTS])
+        if not stochastic:
+            action_dist = action_dist.to_deterministic()
+        actions = action_dist.sample()
+    return actions
 
 
 def compute_deterministic_action(
@@ -179,14 +244,31 @@ def compute_deterministic_action(
     policy_id: str = SHARED_POLICY_ID,
 ) -> dict[str, Any]:
     if stack_mode == "new":
-        return _normalize_action(_compute_action_new_stack(algo, obs))
+        motion_dim = _policy_motion_dim(algo, policy_id=policy_id)
+        return _normalize_action(_compute_action_new_stack(algo, obs, stochastic=False, policy_id=policy_id), motion_dim=motion_dim)
     action = algo.compute_single_action(obs, policy_id=policy_id, explore=False)
-    return _normalize_action(action)
+    motion_dim = _policy_motion_dim(algo, policy_id=policy_id)
+    return _normalize_action(action, motion_dim=motion_dim)
 
 
-def _normalize_batched_actions(action_batch: Any, batch_size: int) -> list[dict[str, Any]]:
+def compute_stochastic_action(
+    algo,
+    obs: np.ndarray,
+    *,
+    stack_mode: str = "old",
+    policy_id: str = SHARED_POLICY_ID,
+) -> dict[str, Any]:
+    if stack_mode == "new":
+        motion_dim = _policy_motion_dim(algo, policy_id=policy_id)
+        return _normalize_action(_compute_action_new_stack(algo, obs, stochastic=True, policy_id=policy_id), motion_dim=motion_dim)
+    action = algo.compute_single_action(obs, policy_id=policy_id, explore=True)
+    motion_dim = _policy_motion_dim(algo, policy_id=policy_id)
+    return _normalize_action(action, motion_dim=motion_dim)
+
+
+def _normalize_batched_actions(action_batch: Any, batch_size: int, *, motion_dim: int) -> list[dict[str, Any]]:
     if isinstance(action_batch, dict):
-        motion = np.asarray(action_batch.get("motion", np.zeros((batch_size, 2), dtype=np.float32)), dtype=np.float32)
+        motion = np.asarray(action_batch.get("motion", np.zeros((batch_size, motion_dim), dtype=np.float32)), dtype=np.float32)
         message = np.asarray(action_batch.get("message", np.zeros((batch_size,), dtype=np.int64)))
         if motion.ndim == 1:
             motion = np.broadcast_to(motion.reshape(1, -1), (batch_size, motion.shape[0]))
@@ -197,7 +279,7 @@ def _normalize_batched_actions(action_batch: Any, batch_size: int) -> list[dict[
             message = np.broadcast_to(message, (batch_size,))
         return [
             {
-                "motion": np.clip(motion[idx, :2], -1.0, 1.0).astype(np.float32),
+                "motion": np.clip(motion[idx, :motion_dim], -1.0, 1.0).astype(np.float32),
                 "message": int(np.clip(message[idx], 0, DEFAULT_NUM_MESSAGE_TOKENS - 1)),
             }
             for idx in range(batch_size)
@@ -205,7 +287,7 @@ def _normalize_batched_actions(action_batch: Any, batch_size: int) -> list[dict[
     values = np.asarray(action_batch)
     if values.ndim == 1:
         values = np.broadcast_to(values.reshape(1, -1), (batch_size, values.shape[0]))
-    return [_normalize_action(values[idx]) for idx in range(batch_size)]
+    return [_normalize_action(values[idx], motion_dim=motion_dim) for idx in range(batch_size)]
 
 
 def compute_batched_deterministic_actions(
@@ -219,18 +301,40 @@ def compute_batched_deterministic_actions(
     if not agent_ids:
         return {}
     obs_batch = np.stack([np.asarray(obs_dict[agent_id], dtype=np.float32) for agent_id in agent_ids], axis=0)
+    motion_dim = _policy_motion_dim(algo, policy_id=policy_id)
     if stack_mode == "new":
-        action_batch = _compute_action_batch_new_stack(algo, obs_batch)
+        action_batch = _compute_action_batch_new_stack(algo, obs_batch, stochastic=False, policy_id=policy_id)
     else:
         policy = algo.get_policy(policy_id)
         action_batch, _, _ = policy.compute_actions(obs_batch, explore=False)
-    normalized = _normalize_batched_actions(action_batch, len(agent_ids))
+    normalized = _normalize_batched_actions(action_batch, len(agent_ids), motion_dim=motion_dim)
     return {agent_id: normalized[idx] for idx, agent_id in enumerate(agent_ids)}
 
 
-def sample_random_action(rng: np.random.Generator) -> dict[str, Any]:
+def compute_batched_stochastic_actions(
+    algo,
+    obs_dict: dict[str, np.ndarray],
+    *,
+    stack_mode: str = "old",
+    policy_id: str = SHARED_POLICY_ID,
+) -> dict[str, dict[str, Any]]:
+    agent_ids = list(obs_dict.keys())
+    if not agent_ids:
+        return {}
+    obs_batch = np.stack([np.asarray(obs_dict[agent_id], dtype=np.float32) for agent_id in agent_ids], axis=0)
+    motion_dim = _policy_motion_dim(algo, policy_id=policy_id)
+    if stack_mode == "new":
+        action_batch = _compute_action_batch_new_stack(algo, obs_batch, stochastic=True, policy_id=policy_id)
+    else:
+        policy = algo.get_policy(policy_id)
+        action_batch, _, _ = policy.compute_actions(obs_batch, explore=True)
+    normalized = _normalize_batched_actions(action_batch, len(agent_ids), motion_dim=motion_dim)
+    return {agent_id: normalized[idx] for idx, agent_id in enumerate(agent_ids)}
+
+
+def sample_random_action(rng: np.random.Generator, *, motion_dim: int) -> dict[str, Any]:
     return {
-        "motion": rng.uniform(-1.0, 1.0, size=2).astype(np.float32),
+        "motion": rng.uniform(-1.0, 1.0, size=motion_dim).astype(np.float32),
         "message": int(rng.integers(0, DEFAULT_NUM_MESSAGE_TOKENS)),
     }
 
@@ -273,9 +377,23 @@ def _evaluate_multi_agent_rollouts(
     episode_forward_velocity: list[float] = []
     episode_lateral_velocity: list[float] = []
     episode_abs_angular_velocity: list[float] = []
+    episode_motion_command_abs: list[float] = []
+    episode_motion_command_std_mean: list[float] = []
+    episode_saturated_motion_fraction: list[float] = []
+    episode_abs_desired_activation: list[float] = []
+    episode_abs_activation: list[float] = []
     episode_abs_applied_torque: list[float] = []
     episode_joint_limit_occupancy: list[float] = []
+    episode_near_limit_penalty: list[float] = []
+    episode_fraction_near_limit_joints: list[float] = []
+    episode_joint_limit_excess: list[float] = []
+    episode_saturation_penalty: list[float] = []
+    episode_torque_penalty: list[float] = []
+    episode_joint_limit_high_fraction: list[float] = []
+    episode_joints_quiet_fraction: list[float] = []
+    episode_negative_forward_fraction: list[float] = []
     episode_zero_crossings_per_fish: list[float] = []
+    episode_activation_sign_changes_per_fish: list[float] = []
     episode_nearest_food_distance: list[float] = []
     episode_capture_distance: list[float] = []
     episode_entropy: list[float] = []
@@ -283,6 +401,7 @@ def _evaluate_multi_agent_rollouts(
 
     env = env_factory()
     try:
+        motion_dim = _motion_dim_from_action_space(env.action_space)
         for episode_idx in range(num_episodes):
             obs_dict, _ = env.reset(seed=base_seed + episode_idx)
             total_reward = 0.0
@@ -296,16 +415,44 @@ def _evaluate_multi_agent_rollouts(
             forward_velocity_accum = 0.0
             lateral_velocity_accum = 0.0
             abs_angular_velocity_accum = 0.0
+            motion_command_sum = np.zeros(motion_dim, dtype=np.float64)
+            motion_command_sq_sum = np.zeros(motion_dim, dtype=np.float64)
+            motion_command_abs_accum = 0.0
+            saturated_motion_count = 0.0
+            desired_activation_abs_accum = 0.0
+            abs_activation_accum = 0.0
             abs_applied_torque_accum = 0.0
             joint_limit_occupancy_accum = 0.0
+            near_limit_penalty_accum = 0.0
+            fraction_near_limit_joints_accum = 0.0
+            joint_limit_excess_accum = 0.0
+            saturation_penalty_accum = 0.0
+            torque_penalty_accum = 0.0
+            joint_limit_high_accum = 0.0
+            joints_quiet_accum = 0.0
+            negative_forward_accum = 0.0
             zero_crossings_total = 0.0
+            activation_sign_changes_total = 0.0
             nearest_food_samples: list[float] = []
             capture_distance_samples: list[float] = []
             steps = 0
             token_hist_episode = np.zeros(DEFAULT_NUM_MESSAGE_TOKENS, dtype=np.float64)
 
             while True:
-                action_dict = action_fn(env=env, obs_dict=obs_dict, episode_seed=base_seed + episode_idx, step_idx=steps)
+                action_dict = action_fn(
+                    env=env,
+                    obs_dict=obs_dict,
+                    episode_seed=base_seed + episode_idx,
+                    step_idx=steps,
+                    motion_dim=motion_dim,
+                )
+                for action in action_dict.values():
+                    motion = np.asarray(action.get("motion", np.zeros(motion_dim, dtype=np.float32)), dtype=np.float32).reshape(motion_dim)
+                    motion_command_sum += motion.astype(np.float64)
+                    motion_command_sq_sum += np.square(motion.astype(np.float64))
+                    motion_command_abs_accum += float(np.mean(np.abs(motion)))
+                    saturated_motion_count += float(np.count_nonzero(np.abs(motion) > DEFAULT_SATURATED_COMMAND_THRESHOLD))
+                    desired_activation_abs_accum += float(np.mean(np.abs(motion)))
                 obs_dict, rewards, terminateds, truncateds, infos = env.step(action_dict)
                 steps += 1
 
@@ -323,9 +470,19 @@ def _evaluate_multi_agent_rollouts(
                     forward_velocity_accum += float(infos[agent_id].get("forward_velocity", 0.0))
                     lateral_velocity_accum += float(infos[agent_id].get("lateral_velocity", 0.0))
                     abs_angular_velocity_accum += abs(float(infos[agent_id].get("angular_velocity", 0.0)))
+                    abs_activation_accum += abs(float(infos[agent_id].get("mean_abs_activation", 0.0)))
                     abs_applied_torque_accum += abs(float(infos[agent_id].get("mean_abs_applied_torque", 0.0)))
                     joint_limit_occupancy_accum += float(infos[agent_id].get("mean_joint_limit_ratio", 0.0))
+                    near_limit_penalty_accum += float(infos[agent_id].get("near_limit_penalty", 0.0))
+                    fraction_near_limit_joints_accum += float(infos[agent_id].get("fraction_near_limit_joints", 0.0))
+                    joint_limit_excess_accum += float(infos[agent_id].get("mean_joint_limit_excess", 0.0))
+                    saturation_penalty_accum += float(infos[agent_id].get("locomotion_saturation_penalty", 0.0))
+                    torque_penalty_accum += float(infos[agent_id].get("locomotion_torque_penalty", 0.0))
+                    joint_limit_high_accum += float(bool(infos[agent_id].get("joint_limit_high", False)))
+                    joints_quiet_accum += float(bool(infos[agent_id].get("joints_quiet", False)))
+                    negative_forward_accum += float(bool(infos[agent_id].get("negative_forward_velocity", False)))
                     zero_crossings_total += float(infos[agent_id].get("joint_velocity_zero_crossings", 0))
+                    activation_sign_changes_total += float(infos[agent_id].get("activation_sign_changes_this_step", 0))
                     nearest_food_distance = float(infos[agent_id].get("nearest_food_distance", float("nan")))
                     if np.isfinite(nearest_food_distance):
                         nearest_food_samples.append(nearest_food_distance)
@@ -354,9 +511,25 @@ def _evaluate_multi_agent_rollouts(
             episode_forward_velocity.append(forward_velocity_accum / denom)
             episode_lateral_velocity.append(lateral_velocity_accum / denom)
             episode_abs_angular_velocity.append(abs_angular_velocity_accum / denom)
+            motion_command_mean = motion_command_sum / denom
+            motion_command_var = np.maximum((motion_command_sq_sum / denom) - np.square(motion_command_mean), 0.0)
+            episode_motion_command_abs.append(motion_command_abs_accum / denom)
+            episode_motion_command_std_mean.append(float(np.mean(np.sqrt(motion_command_var.astype(np.float64)))))
+            episode_saturated_motion_fraction.append(saturated_motion_count / float(max(steps * num_agents * motion_dim, 1)))
+            episode_abs_desired_activation.append(desired_activation_abs_accum / denom)
+            episode_abs_activation.append(abs_activation_accum / denom)
             episode_abs_applied_torque.append(abs_applied_torque_accum / denom)
             episode_joint_limit_occupancy.append(joint_limit_occupancy_accum / denom)
+            episode_near_limit_penalty.append(near_limit_penalty_accum / denom)
+            episode_fraction_near_limit_joints.append(fraction_near_limit_joints_accum / denom)
+            episode_joint_limit_excess.append(joint_limit_excess_accum / denom)
+            episode_saturation_penalty.append(saturation_penalty_accum / denom)
+            episode_torque_penalty.append(torque_penalty_accum / denom)
+            episode_joint_limit_high_fraction.append(joint_limit_high_accum / denom)
+            episode_joints_quiet_fraction.append(joints_quiet_accum / denom)
+            episode_negative_forward_fraction.append(negative_forward_accum / denom)
             episode_zero_crossings_per_fish.append(zero_crossings_total / float(num_agents))
+            episode_activation_sign_changes_per_fish.append(activation_sign_changes_total / float(num_agents))
             episode_nearest_food_distance.append(_mean_or_nan(nearest_food_samples))
             episode_capture_distance.append(_mean_or_nan(capture_distance_samples))
             episode_entropy.append(_message_entropy(token_hist_episode))
@@ -381,9 +554,38 @@ def _evaluate_multi_agent_rollouts(
         mean_forward_velocity=float(np.mean(episode_forward_velocity)) if episode_forward_velocity else float("nan"),
         mean_lateral_velocity=float(np.mean(episode_lateral_velocity)) if episode_lateral_velocity else float("nan"),
         mean_abs_angular_velocity=float(np.mean(episode_abs_angular_velocity)) if episode_abs_angular_velocity else float("nan"),
+        num_motion_joints=int(motion_dim),
+        mean_motion_command_abs=float(np.mean(episode_motion_command_abs)) if episode_motion_command_abs else float("nan"),
+        mean_motion_command_std_mean=float(np.mean(episode_motion_command_std_mean)) if episode_motion_command_std_mean else float("nan"),
+        fraction_saturated_motion_commands=(
+            float(np.mean(episode_saturated_motion_fraction)) if episode_saturated_motion_fraction else float("nan")
+        ),
+        mean_abs_desired_activation=float(np.mean(episode_abs_desired_activation)) if episode_abs_desired_activation else float("nan"),
+        mean_abs_activation=float(np.mean(episode_abs_activation)) if episode_abs_activation else float("nan"),
         mean_abs_applied_torque=float(np.mean(episode_abs_applied_torque)) if episode_abs_applied_torque else float("nan"),
         mean_joint_limit_occupancy=float(np.mean(episode_joint_limit_occupancy)) if episode_joint_limit_occupancy else float("nan"),
+        mean_near_limit_penalty=float(np.mean(episode_near_limit_penalty)) if episode_near_limit_penalty else float("nan"),
+        fraction_near_limit_joints=(
+            float(np.mean(episode_fraction_near_limit_joints)) if episode_fraction_near_limit_joints else float("nan")
+        ),
+        mean_joint_limit_excess=float(np.mean(episode_joint_limit_excess)) if episode_joint_limit_excess else float("nan"),
+        mean_saturation_penalty=float(np.mean(episode_saturation_penalty)) if episode_saturation_penalty else float("nan"),
+        mean_torque_penalty=float(np.mean(episode_torque_penalty)) if episode_torque_penalty else float("nan"),
+        fraction_joint_limit_high_steps=(
+            float(np.mean(episode_joint_limit_high_fraction)) if episode_joint_limit_high_fraction else float("nan")
+        ),
+        fraction_joints_quiet_steps=(
+            float(np.mean(episode_joints_quiet_fraction)) if episode_joints_quiet_fraction else float("nan")
+        ),
+        fraction_negative_forward_velocity_steps=(
+            float(np.mean(episode_negative_forward_fraction)) if episode_negative_forward_fraction else float("nan")
+        ),
         mean_joint_velocity_zero_crossings_per_fish=float(np.mean(episode_zero_crossings_per_fish)) if episode_zero_crossings_per_fish else float("nan"),
+        mean_activation_sign_changes_per_fish=(
+            float(np.mean(episode_activation_sign_changes_per_fish))
+            if episode_activation_sign_changes_per_fish
+            else float("nan")
+        ),
         mean_nearest_food_distance=_mean_or_nan(episode_nearest_food_distance),
         mean_capture_distance=_mean_or_nan(episode_capture_distance),
         mean_message_entropy=float(np.mean(episode_entropy)) if episode_entropy else float("nan"),
@@ -400,19 +602,29 @@ def evaluate_multi_agent_rollouts(
     env_factory,
     num_episodes: int,
     base_seed: int,
+    action_selection: str = "deterministic",
     stack_mode: str = "old",
     policy_id: str = SHARED_POLICY_ID,
 ) -> ColorCommEvalResult:
-    return _evaluate_multi_agent_rollouts(
-        env_factory=env_factory,
-        num_episodes=num_episodes,
-        base_seed=base_seed,
-        action_fn=lambda *, env, obs_dict, episode_seed, step_idx: compute_batched_deterministic_actions(
+    if action_selection == "stochastic":
+        action_fn = lambda *, env, obs_dict, episode_seed, step_idx, motion_dim: compute_batched_stochastic_actions(
             algo,
             obs_dict,
             stack_mode=stack_mode,
             policy_id=policy_id,
-        ),
+        )
+    else:
+        action_fn = lambda *, env, obs_dict, episode_seed, step_idx, motion_dim: compute_batched_deterministic_actions(
+            algo,
+            obs_dict,
+            stack_mode=stack_mode,
+            policy_id=policy_id,
+        )
+    return _evaluate_multi_agent_rollouts(
+        env_factory=env_factory,
+        num_episodes=num_episodes,
+        base_seed=base_seed,
+        action_fn=action_fn,
     )
 
 
@@ -424,9 +636,9 @@ def evaluate_multi_agent_random_rollouts(
 ) -> ColorCommEvalResult:
     episode_rngs: dict[int, np.random.Generator] = {}
 
-    def action_fn(*, env, obs_dict, episode_seed, step_idx):
+    def action_fn(*, env, obs_dict, episode_seed, step_idx, motion_dim):
         rng = episode_rngs.setdefault(episode_seed, np.random.default_rng(episode_seed))
-        return {agent_id: sample_random_action(rng) for agent_id in obs_dict.keys()}
+        return {agent_id: sample_random_action(rng, motion_dim=motion_dim) for agent_id in obs_dict.keys()}
 
     return _evaluate_multi_agent_rollouts(
         env_factory=env_factory,

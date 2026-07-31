@@ -1,0 +1,85 @@
+{
+  "checkpoint_path": "C:\\Users\\adminlcarreira\\SwimmingPolygons\\08 Color Communication School\\rllib_checkpoints_smoke_v8_color_comm\\checkpoint_final",
+  "device": "cuda",
+  "results": [
+    {
+      "backend": null,
+      "case": "env_only_random",
+      "fps": 114.18718710558284,
+      "mean_action_ms": 0.05705199747656783,
+      "mean_render_ms": 0.0,
+      "mean_step_ms": 8.700497998700788,
+      "ms_per_frame": 8.757549996177357,
+      "render_enabled": false,
+      "render_engine": "auto",
+      "render_profile": "fast",
+      "steps": 150
+    },
+    {
+      "backend": "FigureCanvasTkAgg",
+      "case": "random_fast_render",
+      "fps": 32.3025169526545,
+      "mean_action_ms": 0.10785998698944846,
+      "mean_render_ms": 20.117238344391808,
+      "mean_step_ms": 10.732241663693761,
+      "ms_per_frame": 30.957339995075017,
+      "render_enabled": true,
+      "render_engine": "auto",
+      "render_profile": "fast",
+      "steps": 60
+    },
+    {
+      "backend": "FigureCanvasTkAgg",
+      "case": "random_full_render",
+      "fps": 26.293998902974177,
+      "mean_action_ms": 0.10266000754199922,
+      "mean_render_ms": 27.975623323194064,
+      "mean_step_ms": 9.953208329776922,
+      "ms_per_frame": 38.031491660512984,
+      "render_enabled": true,
+      "render_engine": "auto",
+      "render_profile": "full",
+      "steps": 60
+    },
+    {
+      "backend": null,
+      "case": "trained_no_render",
+      "fps": 82.94675077904444,
+      "mean_action_ms": 3.1449560029432178,
+      "mean_render_ms": 0.0,
+      "mean_step_ms": 8.91097133125489,
+      "ms_per_frame": 12.055927334198108,
+      "render_enabled": false,
+      "render_engine": "auto",
+      "render_profile": "fast",
+      "steps": 150
+    },
+    {
+      "backend": "FigureCanvasTkAgg",
+      "case": "trained_fast_render",
+      "fps": 27.73920486973891,
+      "mean_action_ms": 4.236293335755666,
+      "mean_render_ms": 20.773449992217746,
+      "mean_step_ms": 11.040316675401602,
+      "ms_per_frame": 36.05006000337501,
+      "render_enabled": true,
+      "render_engine": "auto",
+      "render_profile": "fast",
+      "steps": 60
+    },
+    {
+      "backend": "FigureCanvasTkAgg",
+      "case": "trained_full_render",
+      "fps": 21.66467303484204,
+      "mean_action_ms": 6.01508499821648,
+      "mean_render_ms": 29.59808833547868,
+      "mean_step_ms": 10.544920000635708,
+      "ms_per_frame": 46.158093334330864,
+      "render_enabled": true,
+      "render_engine": "auto",
+      "render_profile": "full",
+      "steps": 60
+    }
+  ],
+  "timestamp": "2026-03-20T15:52:49"
+}

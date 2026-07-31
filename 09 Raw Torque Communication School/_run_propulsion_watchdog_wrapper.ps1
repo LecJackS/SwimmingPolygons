@@ -1,0 +1,3 @@
+﻿$env:MPLBACKEND = 'Agg'
+& 'c:\Users\adminlcarreira\SwimmingPolygons\.venv\Scripts\python.exe' 'c:\Users\adminlcarreira\SwimmingPolygons\09 Raw Torque Communication School\propulsion_campaign_watchdog.py' --manifest-path 'c:\Users\adminlcarreira\SwimmingPolygons\09 Raw Torque Communication School\propulsion_limitpressure_campaign_manifest.json' --target-root 'c:\Users\adminlcarreira\SwimmingPolygons\09 Raw Torque Communication School\rllib_checkpoints_v9_day_campaign_limitpressure' --device cuda --eval-device cuda --poll-interval-seconds 30 --launch-grace-seconds 20 --heartbeat-stale-seconds 180
+exit $LASTEXITCODE
